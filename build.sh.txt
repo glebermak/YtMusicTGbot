@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -o errexit
+
+mkdir -p ffmpeg
+curl -s https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ --strip-components=1 -C ffmpeg
+export PATH=$PATH:$(pwd)/ffmpeg
+
+pip install -r requirements.txt

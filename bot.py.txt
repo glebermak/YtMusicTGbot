@@ -1,0 +1,152 @@
+import asyncio
+import os
+import logging
+import json
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.filters import CommandStart
+import yt_dlp
+
+logging.basicConfig(level=logging.INFO)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# Команда /start
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    await message.answer("🎵 Отправьте название песни или исполнителя, и я найду варианты для скачивания!")
+
+# 1. Поиск 5 вариантов по названию
+@dp.message(F.text)
+async def search_tracks(message: Message):
+    query = message.text.strip()
+    
+    # Если прислали прямую ссылку — скачиваем сразу
+    if query.startswith("http://") or query.startswith("https://"):
+        await download_and_send(message.chat.id, query)
+        return
+
+    status_msg = await message.answer(f"🔍 Ищу варианты по запросу: <b>{query}</b>...", parse_mode="HTML")
+
+    # Ищем 5 вариантов без скачивания (process=False)
+    ydl_opts = {
+        'extract_flat': True,
+        'quiet': True,
+    }
+
+    try:
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None,
+            lambda: _search_youtube(f"ytsearch5:{query}", ydl_opts)
+        )
+
+        if not results:
+            await status_msg.edit_text("❌ Ничего не найдено. Попробуйте изменить запрос.")
+            return
+
+        # Формируем Inline-кнопки
+        keyboard_buttons = []
+        text_response = "<b>Выберите подходящий трек:</b>\n\n"
+
+        for idx, item in enumerate(results, 1):
+            title = item.get('title', 'Без названия')
+            duration = item.get('duration')
+            video_id = item.get('id')
+
+            # Форматируем длительность в минуты:секунды
+            dur_str = f" ({int(duration // 60)}:{int(duration % 60):02d})" if duration else ""
+            
+            text_response += f"{idx}. {title}{dur_str}\n"
+
+            # В callback_data передаем ID видео
+            keyboard_buttons.append([
+                InlineKeyboardButton(text=f"🎵 {idx}. Скачать", callback_data=f"dl:{video_id}")
+            ])
+
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+        await status_msg.edit_text(text_response, reply_markup=reply_markup, parse_mode="HTML")
+
+    except Exception as e:
+        logging.error(f"Ошибка поиска: {e}")
+        await status_msg.edit_text("❌ Произошла ошибка при поиске.")
+
+# 2. Обработка нажатия на кнопку "Скачать"
+@dp.callback_query(F.data.startswith("dl:"))
+async def process_download_callback(callback: CallbackQuery):
+    video_id = callback.data.split(":")[1]
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Подтверждаем получение клика
+    await callback.answer("Загрузка началась...")
+    
+    # Редактируем сообщение, удаляя кнопки
+    status_msg = await callback.message.answer("⏳ Скачиваю и конвертирую аудио...")
+
+    await download_and_send(callback.message.chat.id, video_url, status_msg)
+
+# Функция скачивания и отправки MP3
+async def download_and_send(chat_id: int, url: str, status_msg: Message = None):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': 'downloads/%(id)s.%(ext)s',
+        'quiet': True,
+        'noplaylist': True,
+    }
+
+    try:
+        loop = asyncio.get_event_loop()
+        file_info = await loop.run_in_executor(
+            None,
+            lambda: _download_file(url, ydl_opts)
+        )
+
+        file_path = file_info['file_path']
+        title = file_info['title']
+
+        if status_msg:
+            await status_msg.edit_text("📤 Отправляю файл...")
+
+        audio_file = FSInputFile(file_path)
+        await bot.send_audio(chat_id=chat_id, audio=audio_file, caption=title)
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        if status_msg:
+            await status_msg.delete()
+
+    except Exception as e:
+        logging.error(f"Ошибка загрузки: {e}")
+        if status_msg:
+            await status_msg.edit_text("❌ Ошибка при скачивании этого трека.")
+
+def _search_youtube(query, opts):
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(query, download=False)
+        return info.get('entries', [])
+
+def _download_file(url, opts):
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        mp3_filename = os.path.splitext(filename)[0] + ".mp3"
+        return {
+            'file_path': mp3_filename,
+            'title': info.get('title', 'Audio')
+        }
+
+async def main():
+    os.makedirs("downloads", exist_ok=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
