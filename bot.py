@@ -1,19 +1,30 @@
 import asyncio
 import os
 import logging
-import json
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.filters import CommandStart
+from aiohttp import web
 import yt_dlp
 
 logging.basicConfig(level=logging.INFO)
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Минимальный веб-сервер для "обмана" проверки Render
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 # Команда /start
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
@@ -146,6 +157,9 @@ def _download_file(url, opts):
 
 async def main():
     os.makedirs("downloads", exist_ok=True)
+    # Запускаем фейковый веб-сервер фоном
+    await start_web_server()
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
